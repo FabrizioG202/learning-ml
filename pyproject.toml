@@ -3,8 +3,10 @@ name = "learning-ml"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
+    "plotly>=7.1.0",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
+    "tqdm>=4.70.1",
 ]
 
 [dependency-groups]
