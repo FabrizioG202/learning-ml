@@ -1,14 +1,12 @@
 # %%
-import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torchvision import transforms
 from torchvision.datasets import MNIST
 from tqdm import tqdm
-import torch.nn.functional as F
 
 # %%
 train_loader, val_loader, test_loader = (
@@ -40,6 +38,7 @@ train_loader, val_loader, test_loader = (
 
 # %%
 
+
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
@@ -60,7 +59,6 @@ class Model(nn.Module):
 
         # second conv layer
         x = self.pool2(F.relu(self.conv2(x)))
-
 
         # fully connected
         x = self.flatten(x)
