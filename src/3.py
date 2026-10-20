@@ -2,12 +2,16 @@
 import re
 from collections import Counter
 
+import numpy as np
+import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
+from sklearn.decomposition import PCA
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
@@ -116,6 +120,7 @@ train_loader, val_loader, test_loader = [
 
 # %%
 
+
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
@@ -191,4 +196,37 @@ fig.add_trace(go.Scatter(y=train_losses, name="train loss"))
 fig.add_trace(go.Scatter(y=val_losses, name="val loss"))
 fig.show()
 
+
 # %%
+def get_embeddings(word: str) -> list[float] | None:
+    model.eval()
+
+    token_id = vocab.get(word)
+
+    # (unknown token)
+    if token_id == vocab.get("<unk>"):
+        return None
+
+    with torch.inference_mode():
+        embedding = model.embedding(torch.tensor([token_id], device="cuda"))
+        return embedding.squeeze(0).cpu().tolist()
+
+
+def plot_embeddings(words: list[str]) -> go.Figure:
+
+    # plot embeddings of few words:
+    # good, bad, terrible, awful, nice, enjoyable, like
+    embeddings = [(word, get_embeddings(word)) for word in words]
+
+    # Remove unknown words.
+    embeddings = [e for e in embeddings if e[1] is not None]
+
+    X = np.array([embedding for _, embedding in embeddings])
+    words = [word for word, embedding in embeddings]
+
+    pca = PCA(n_components=2)
+    x_2d = pca.fit_transform(X)
+
+    return px.scatter(text=words, x=x_2d[:, 0], y=x_2d[:, 1])
+
+plot_embeddings(["good", "bad", "terrible", "awful", "nice", "enjoyable", "like"]).show()
