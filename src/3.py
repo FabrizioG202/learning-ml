@@ -2,11 +2,18 @@
 import re
 from collections import Counter
 
+import plotly.graph_objects as go
+import plotly.io as pio
 import torch
+import torch.nn.functional as F
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
+from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.datasets import MNIST
+from tqdm import tqdm
 
 # %%
 dataset = load_dataset("stanfordnlp/imdb", cache_dir="../.data")
@@ -45,6 +52,9 @@ class Vocab:
 
     def tokenize_sentence(self, text: str) -> list[int]:
         return [self.get(t) for t in self.__tokenize(text)]
+
+    def __len__(self) -> int:
+        return len(self.mapping)
 
 
 split = dataset["train"].train_test_split(test_size=0.05, seed=42)
@@ -96,7 +106,7 @@ def collate_fn(batch):
 train_loader, val_loader, test_loader = [
     DataLoader(
         DatasetLoader(d, vocab, 256),
-        batch_size=4,
+        batch_size=2048,
         shuffle=True,
         collate_fn=collate_fn,
     )
@@ -106,9 +116,79 @@ train_loader, val_loader, test_loader = [
 
 # %%
 
-# %%
-x, y = next(iter(train_loader))
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        embedding_dim = 64
 
-print("Inputs:", x.shape, x.dtype)
-print("Labels:", y.shape, y.dtype)
-print("Vocabulary size:", len(vocab.mapping))
+        self.embedding = nn.Embedding(
+            num_embeddings=len(vocab), embedding_dim=embedding_dim
+        )
+        self.linear = nn.Linear(embedding_dim, 1)
+
+    def forward(self, x):  # ty: ignore[invalid-mutable-override]
+        embeddings = self.embedding(x)
+
+        mask = (x != 0).unsqueeze(-1)
+        summed = (embeddings * mask).sum(dim=1)
+        counts = mask.sum(dim=1).clamp(min=1)
+
+        pooled = summed / counts
+
+        return self.linear(pooled).squeeze(-1)
+
+
+model = Model().to("cuda")
+
+criterion = nn.BCEWithLogitsLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+train_losses: list[float] = []
+val_losses: list[float] = []
+
+N_EPOCH = 128
+for i in tqdm(range(N_EPOCH)):
+    model.train()
+    total_loss = 0
+
+    for x_batch, y_batch in train_loader:
+        optimizer.zero_grad()
+
+        x_batch = x_batch.to("cuda")
+        y_batch = y_batch.to("cuda").float()
+
+        y_ = model(x_batch)
+        loss = criterion(y_, y_batch)
+
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * y_batch.shape[0]
+
+    train_losses.append(total_loss / len(train_loader.dataset))  # ty: ignore[invalid-argument-type]
+
+    model.eval()
+    total_loss = 0
+
+    with torch.inference_mode():
+        for x_batch, y_batch in val_loader:
+            x_batch = x_batch.to("cuda")
+            y_batch = y_batch.to("cuda").float()
+
+            y_ = model(x_batch)
+            loss = criterion(y_, y_batch)
+
+            total_loss += loss.item() * y_batch.shape[0]
+
+    val_losses.append(total_loss / len(val_loader.dataset))  # ty: ignore[invalid-argument-type]
+
+
+# %%
+pio.renderers.default = "browser"
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(y=train_losses, name="train loss"))
+fig.add_trace(go.Scatter(y=val_losses, name="val loss"))
+fig.show()
+
+# %%
