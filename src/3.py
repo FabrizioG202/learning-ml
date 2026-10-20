@@ -3,20 +3,16 @@ import re
 from collections import Counter
 
 import numpy as np
-import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 import torch
-import torch.nn.functional as F
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
 from sklearn.decomposition import PCA
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
-from torchvision import transforms
-from torchvision.datasets import MNIST
 from tqdm import tqdm
 
 # %%
@@ -229,4 +225,7 @@ def plot_embeddings(words: list[str]) -> go.Figure:
 
     return px.scatter(text=words, x=x_2d[:, 0], y=x_2d[:, 1])
 
-plot_embeddings(["good", "bad", "terrible", "awful", "nice", "enjoyable", "like"]).show()
+
+plot_embeddings(
+    ["good", "bad", "terrible", "awful", "nice", "enjoyable", "like"]
+).show()
