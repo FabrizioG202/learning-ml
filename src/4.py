@@ -1,10 +1,11 @@
 # %%
 from pathlib import Path
 
-import numpy as np
+import plotly.graph_objects as go
+import plotly.io as pio
 import torch
-import torch.nn as nn
-from torch.utils.data import Dataset
+from torch import nn
+from torch.utils.data import Subset, random_split
 from tqdm import tqdm
 
 from common.chunk_dataset import ChunkDataset
@@ -17,21 +18,29 @@ DATA_PATH = bonito_download.download_file(
 )
 
 # %%
-train_loader, test_loader, val_loader = (
+train_loader, val_loader, test_loader = (
     torch.utils.data.DataLoader(
         d,
         batch_size=8,
-        shuffle=True,
+        shuffle=shuffle,
         pin_memory=True,
     )
-    for d in ChunkDataset.full_from_path(DATA_PATH)
-    .take(10_000)
-    .tri_split(test_ratio=0.75, val_ratio=0.05, seed=42)
+    for (d, shuffle) in zip(
+        random_split(
+            Subset(ChunkDataset.full_from_path(DATA_PATH), range(1_000)),
+            [0.7, 0.15, 0.15],
+            generator=torch.Generator().manual_seed(0),
+        ),
+        [True, False, False],
+    )
 )
 
-# for x_, y_, z in (train_loader):
-#     print(x_.shape)
-#     break
+print(
+    f"Dataset sizes train = {len(train_loader.dataset)}, "  # ty: ignore[invalid-argument-type]
+    f"val = {len(val_loader.dataset)}, "  # ty: ignore[invalid-argument-type]
+    f"test = {len(test_loader.dataset)}"  # ty: ignore[invalid-argument-type]
+)
+
 
 model = nn.Sequential(
     nn.Conv1d(
@@ -44,4 +53,83 @@ model = nn.Sequential(
     nn.ReLU(),
     nn.Conv1d(16, 5, kernel_size=1),
 ).to("cuda")
+
+N_EPOCHS = 10
+
+criterion = nn.CTCLoss(blank=0)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+train_losses = []
+val_losses = []
+
+for _ in tqdm(range(N_EPOCHS)):
+    model.train()
+    total_loss = 0
+
+    for x, y, target_lengths in train_loader:
+        optimizer.zero_grad()
+
+        x = x.to("cuda")
+        y = y.to("cuda")
+
+        # Forward pass
+        y_ = model(x)
+
+        # CTC expects inputs in the shape (length, batches, # of classes)
+        log_probs = y_.permute(2, 0, 1).log_softmax(dim=2)
+
+        # input lengths are the number of timesteps per each sample, which
+        # is the same for all the samples
+        input_lengths = torch.full(
+            (x.shape[0],),
+            y_.shape[2],
+            dtype=torch.long,
+        )
+
+        loss = criterion(log_probs, y, input_lengths, target_lengths)
+
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item() * y.shape[0]
+
+    train_losses.append(total_loss / len(train_loader.dataset))  # ty: ignore[invalid-argument-type]
+
+    model.eval()
+    total_loss = 0
+
+    with torch.inference_mode():
+        for x, y, target_lengths in val_loader:
+            x = x.to("cuda")
+            y = y.to("cuda")
+
+            # Forward pass
+            y_ = model(x)
+
+            # CTC expects inputs in the shape (length, batches, # of classes)
+            log_probs = y_.permute(2, 0, 1).log_softmax(dim=2)
+
+            # input lengths are the number of timesteps per each sample, which
+            # is the same for all the samples
+            input_lengths = torch.full(
+                (x.shape[0],),
+                y_.shape[2],
+                dtype=torch.long,
+            )
+
+            loss = criterion(log_probs, y, input_lengths, target_lengths)
+
+            total_loss += loss.item() * y.shape[0]
+
+    val_losses.append(total_loss / len(val_loader.dataset))  # ty: ignore[invalid-argument-type]
+
+# %%
+pio.renderers.default = "browser"
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(y=train_losses, name="train loss"))
+fig.add_trace(go.Scatter(y=val_losses, name="val loss"))
+fig.show()
+
+# %%
 
