@@ -83,15 +83,16 @@ class Downloader(BaseDownloader):
         fpath.unlink()
         return unzip_path
 
-def download_files(
-    out_dir: Path, file_list: list[str], show: bool = False, force: bool = False
-):
+def download_file(
+    out_dir: Path, file: str, show: bool = False, force: bool = False
+) -> Path | None:
     dl: BaseDownloader = Printer() if show else Downloader(out_dir, force)
-    for remote_file in file_list:
-        try:
-            dl.download(remote_file)
-        except FileNotFoundError:
-            print(f" - Failed to download: {remote_file}")
+    try:
+        dl.download(file)
+        return out_dir / file
+
+    except FileNotFoundError:
+        print(f" - Failed to download: {file}")
 
 
 ALL_TRAINING_FILES = [
