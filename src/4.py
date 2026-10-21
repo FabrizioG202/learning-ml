@@ -4,6 +4,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 import plotly.io as pio
 import torch
+from rapidfuzz.distance import Levenshtein
 from torch import nn
 from torch.utils.data import Subset, random_split
 from tqdm import tqdm
@@ -141,8 +142,11 @@ def decode_sequence(seq: torch.Tensor) -> str:
 
 model.eval()
 
+total_edit_distance = 0
+sample_count = 0
+
 with torch.inference_mode():
-    x, y, target_lengths = next(iter(train_loader))
+    x, y, target_lengths = next(iter(val_loader))
 
     x = x.to("cuda")
     y = y.to("cuda")
@@ -153,13 +157,13 @@ with torch.inference_mode():
     for i in range(len(x)):
         pred = predictions[i]
 
-        print("Raw predictions:")
-        print(decode_sequence(pred[:150]))
+        # print("Raw predictions:")
+        # print(decode_sequence(pred[:150]))
 
         counts = torch.bincount(pred, minlength=5)
 
-        for symbol, count in zip("-ACGT", counts.tolist()):
-            print(f"{symbol}: {count / len(pred):.2%}")
+        # for symbol, count in zip("-ACGT", counts.tolist()):
+        #     print(f"{symbol}: {count / len(pred):.2%}")
 
         # collapse consequetive predictions
         pred = torch.unique_consecutive(pred)
@@ -171,5 +175,12 @@ with torch.inference_mode():
         ref_ids = y[i, 0 : target_lengths[i]].tolist()
         expected = decode_sequence(torch.tensor(ref_ids))
 
-        print(f"Expected: {expected}")
-        print(f"Predicted: {pred_str}")
+        # print(f"Expected: {expected}")
+        # print(f"Predicted: {pred_str}")
+
+        edit_distance = Levenshtein.distance(expected, pred_str)
+        # print(f"Edit distance: {edit_distance}")
+        total_edit_distance += edit_distance
+        sample_count += 1
+
+print(f"Average edit distance: {total_edit_distance / sample_count:.2f}")
