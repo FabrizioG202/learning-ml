@@ -1,1 +1,1 @@
-This is just a collection of files I produced while learning torch and ml in general. Every single line of code in the .src folder, (except very few instances that are noted as so) is written by me. I did not allow myself to use AI (for writing) or Copilot completions.
+This is just a collection of files I produced while learning torch and ml in general. Every single line of code (except very few instances that are noted as so) in the .src folder (not including vendor), is written by me. I did not allow myself to use AI (for writing) or Copilot completions.
