@@ -85,14 +85,14 @@ class Downloader(BaseDownloader):
 
 def download_file(
     out_dir: Path, file: str, show: bool = False, force: bool = False
-) -> Path | None:
+) -> Path :
     dl: BaseDownloader = Printer() if show else Downloader(out_dir, force)
     try:
         dl.download(file)
         return out_dir / file
 
     except FileNotFoundError:
-        print(f" - Failed to download: {file}")
+        raise ValueError(f"File {file} not found in the list of available files.")
 
 
 ALL_TRAINING_FILES = [
