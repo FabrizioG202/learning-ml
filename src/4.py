@@ -27,8 +27,9 @@ train_loader, val_loader, test_loader = (
     )
     for (d, shuffle) in zip(
         random_split(
-            Subset(ChunkDataset.full_from_path(DATA_PATH), range(1_000)),
-            [0.7, 0.15, 0.15],
+            Subset(ChunkDataset.full_from_path(DATA_PATH), range(1)),
+            # [0.7, 0.15, 0.15],
+            [1.0, 0.0, 0.0],
             generator=torch.Generator().manual_seed(0),
         ),
         [True, False, False],
@@ -43,18 +44,16 @@ print(
 
 
 model = nn.Sequential(
-    nn.Conv1d(
-        in_channels=1,
-        out_channels=16,
-        kernel_size=5,
-        stride=2,
-        padding=2,
-    ),
+    nn.Conv1d(1, 32, kernel_size=15, stride=2, padding=7),
     nn.ReLU(),
-    nn.Conv1d(16, 5, kernel_size=1),
+    nn.Conv1d(32, 64, kernel_size=15, stride=2, padding=7),
+    nn.ReLU(),
+    nn.Conv1d(64, 64, kernel_size=15, padding=7),
+    nn.ReLU(),
+    nn.Conv1d(64, 5, kernel_size=1),
 ).to("cuda")
 
-N_EPOCHS = 10
+N_EPOCHS = 1000
 
 criterion = nn.CTCLoss(blank=0)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -99,6 +98,9 @@ for _ in tqdm(range(N_EPOCHS)):
     total_loss = 0
 
     with torch.inference_mode():
+        if len(val_loader.dataset) == 0:  # ty: ignore[invalid-argument-type]
+            continue
+
         for x, y, target_lengths in val_loader:
             x = x.to("cuda")
             y = y.to("cuda")
@@ -136,10 +138,11 @@ fig.show()
 def decode_sequence(seq: torch.Tensor) -> str:
     return "".join("ACGT"[i - 1] if i != 0 else "-" for i in seq)
 
+
 model.eval()
 
 with torch.inference_mode():
-    x, y, target_lengths = next(iter(test_loader))
+    x, y, target_lengths = next(iter(train_loader))
 
     x = x.to("cuda")
     y = y.to("cuda")
@@ -149,6 +152,9 @@ with torch.inference_mode():
 
     for i in range(len(x)):
         pred = predictions[i]
+
+        print("Raw predictions:")
+        print(decode_sequence(pred[:150]))
 
         counts = torch.bincount(pred, minlength=5)
 
@@ -162,12 +168,8 @@ with torch.inference_mode():
         # decode the sequence
         pred_str = decode_sequence(pred)
 
-        ref_ids = y[i, 0:target_lengths[i]].tolist()
+        ref_ids = y[i, 0 : target_lengths[i]].tolist()
         expected = decode_sequence(torch.tensor(ref_ids))
 
-        print("Raw predictions:")
-        print(decode_sequence(pred[:150]))
         print(f"Expected: {expected}")
         print(f"Predicted: {pred_str}")
-
-
