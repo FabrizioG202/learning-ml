@@ -131,5 +131,43 @@ fig.add_trace(go.Scatter(y=train_losses, name="train loss"))
 fig.add_trace(go.Scatter(y=val_losses, name="val loss"))
 fig.show()
 
+
 # %%
+def decode_sequence(seq: torch.Tensor) -> str:
+    return "".join("ACGT"[i - 1] if i != 0 else "-" for i in seq)
+
+model.eval()
+
+with torch.inference_mode():
+    x, y, target_lengths = next(iter(test_loader))
+
+    x = x.to("cuda")
+    y = y.to("cuda")
+
+    y_ = model(x)
+    predictions = y_.argmax(1).cpu()
+
+    for i in range(len(x)):
+        pred = predictions[i]
+
+        counts = torch.bincount(pred, minlength=5)
+
+        for symbol, count in zip("-ACGT", counts.tolist()):
+            print(f"{symbol}: {count / len(pred):.2%}")
+
+        # collapse consequetive predictions
+        pred = torch.unique_consecutive(pred)
+        pred = pred[pred != 0]  # remove blank tokens
+
+        # decode the sequence
+        pred_str = decode_sequence(pred)
+
+        ref_ids = y[i, 0:target_lengths[i]].tolist()
+        expected = decode_sequence(torch.tensor(ref_ids))
+
+        print("Raw predictions:")
+        print(decode_sequence(pred[:150]))
+        print(f"Expected: {expected}")
+        print(f"Predicted: {pred_str}")
+
 
