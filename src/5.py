@@ -310,7 +310,7 @@ caller = BasecallerHarness(
         nn.Conv1d(64, 5, kernel_size=1),
     ).to("cuda"),
     split_ratios=[0.8, 0.15, 0.05],
-    dataset_size=100_000,
+    dataset_size=1000,
     batch_size=512,
     checkpoint_save_path="../.models/5.py",
 )
