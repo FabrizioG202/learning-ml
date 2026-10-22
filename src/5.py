@@ -11,6 +11,7 @@ from torch.utils.data import Subset, random_split
 from tqdm import tqdm
 
 from common.chunk_dataset import ChunkDataset
+from common.losses import Losses
 from vendor import bonito_download
 from vendor.early_stopping import EarlyStopping
 
@@ -20,40 +21,7 @@ DATA_PATH = bonito_download.download_file(
     bonito_download.ALL_TRAINING_FILES[1],
 )
 
-
 # %%
-class Losses:
-    _losses: np.ndarray
-
-    def __init__(self, losses: np.ndarray):
-        self._losses = losses
-
-    @property
-    def train(self) -> list[float]:
-        return self._losses[0].tolist()
-
-    @property
-    def validation(self) -> list[float]:
-        return self._losses[1].tolist()
-
-    def save(self, path: Path) -> None:
-        np.savez(path, train_losses=self.train, val_losses=self.validation)
-
-    @staticmethod
-    def load(path: Path) -> "Losses":
-        with np.load(path) as data:
-            train_losses = data["train_losses"].tolist()
-            val_losses = data["val_losses"].tolist()
-
-        return Losses(np.array([train_losses, val_losses]))
-
-    def plot(self) -> go.Figure:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(y=self.train, name="Train Loss"))
-        fig.add_trace(go.Scatter(y=self.validation, name="Validation Loss"))
-        return fig
-
-
 class BasecallerHarness:
     train_loader: torch.utils.data.DataLoader
     val_loader: torch.utils.data.DataLoader
@@ -299,6 +267,8 @@ caller.log_dataset_size()
 losses = caller.train(epochs=10)
 
 # %%
-
 pio.renderers.default = "browser"
+
 losses.plot().show()
+
+# %%
