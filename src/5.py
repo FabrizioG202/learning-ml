@@ -21,10 +21,40 @@ DATA_PATH = bonito_download.download_file(
 )
 
 
-DataPoint = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+# %%
+class Losses:
+    _losses: np.ndarray
+
+    def __init__(self, losses: np.ndarray):
+        self._losses = losses
+
+    @property
+    def train(self) -> list[float]:
+        return self._losses[0].tolist()
+
+    @property
+    def validation(self) -> list[float]:
+        return self._losses[1].tolist()
+
+    def save(self, path: Path) -> None:
+        np.savez(path, train_losses=self.train, val_losses=self.validation)
+
+    @staticmethod
+    def load(path: Path) -> "Losses":
+        with np.load(path) as data:
+            train_losses = data["train_losses"].tolist()
+            val_losses = data["val_losses"].tolist()
+
+        return Losses(np.array([train_losses, val_losses]))
+
+    def plot(self) -> go.Figure:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(y=self.train, name="Train Loss"))
+        fig.add_trace(go.Scatter(y=self.validation, name="Validation Loss"))
+        return fig
 
 
-class Basecaller:
+class BasecallerHarness:
     train_loader: torch.utils.data.DataLoader
     val_loader: torch.utils.data.DataLoader
     test_loader: torch.utils.data.DataLoader
@@ -45,6 +75,33 @@ class Basecaller:
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
         self.early_stopping = EarlyStopping(patience=10)
 
+        self.train_loader, self.val_loader, self.test_loader = (
+            torch.utils.data.DataLoader(
+                d,
+                batch_size=256,
+                shuffle=shuffle,
+                pin_memory=True,
+            )
+            for (d, shuffle) in zip(
+                random_split(
+                    Subset(ChunkDataset.full_from_path(DATA_PATH), range(dataset_size)),
+                    split_ratios,
+                    generator=torch.Generator().manual_seed(0),
+                ),
+                [True, False, False],
+            )
+        )
+
+    def log_dataset_size(self) -> None:
+        """
+        Logs the size of the dataset to the console.
+        """
+        print(
+            f"Dataset sizes train = {len(self.train_loader.dataset)}, "  # ty: ignore[invalid-argument-type]
+            f"val = {len(self.val_loader.dataset)}, "  # ty: ignore[invalid-argument-type]
+            f"test = {len(self.test_loader.dataset)}"  # ty: ignore[invalid-argument-type]
+        )
+
     @staticmethod
     def decode_sequence(seq: torch.Tensor) -> str:
         """
@@ -52,7 +109,7 @@ class Basecaller:
         """
         return "".join("ACGT"[i - 1] if i != 0 else "-" for i in seq)
 
-    def train(self, epochs: int) -> np.ndarray:
+    def train(self, epochs: int) -> Losses:
         """
         Trains the model, returns a 2D array with size (epochs, 2)
         where first row is train loss and second row is validation loss
@@ -61,17 +118,18 @@ class Basecaller:
         val_losses = []
 
         for epoch in tqdm(range(epochs)):
-            model.train()
+            ### TRAINING
+            self.model.train()
             total_loss = 0
 
-            for x, y, target_lengths in train_loader:
-                optimizer.zero_grad()
+            for x, y, target_lengths in self.train_loader:
+                self.optimizer.zero_grad()
 
                 x = x.to("cuda")
                 y = y.to("cuda")
 
                 # Forward pass
-                y_ = model(x)
+                y_ = self.model(x)
 
                 # CTC expects inputs in the shape (length, batches, # of classes)
                 log_probs = y_.permute(2, 0, 1).log_softmax(dim=2)
@@ -84,28 +142,29 @@ class Basecaller:
                     dtype=torch.long,
                 )
 
-                loss = criterion(log_probs, y, input_lengths, target_lengths)
+                loss = self.criterion(log_probs, y, input_lengths, target_lengths)
 
                 loss.backward()
-                optimizer.step()
+                self.optimizer.step()
 
                 total_loss += loss.item() * y.shape[0]
 
-            train_losses.append(total_loss / len(train_loader.dataset))  # ty: ignore[invalid-argument-type]
+            train_losses.append(total_loss / len(self.train_loader.dataset))  # ty: ignore[invalid-argument-type]
 
-            model.eval()
+            ### EVALUATION
+            self.model.eval()
             total_loss = 0
 
             with torch.inference_mode():
-                if len(val_loader.dataset) == 0:  # ty: ignore[invalid-argument-type]
+                if len(self.val_loader.dataset) == 0:  # ty: ignore[invalid-argument-type]
                     continue
 
-                for x, y, target_lengths in val_loader:
+                for x, y, target_lengths in self.val_loader:
                     x = x.to("cuda")
                     y = y.to("cuda")
 
                     # Forward pass
-                    y_ = model(x)
+                    y_ = self.model(x)
 
                     # CTC expects inputs in the shape (length, batches, # of classes)
                     log_probs = y_.permute(2, 0, 1).log_softmax(dim=2)
@@ -118,21 +177,17 @@ class Basecaller:
                         dtype=torch.long,
                     )
 
-                    loss = criterion(log_probs, y, input_lengths, target_lengths)
+                    loss = self.criterion(log_probs, y, input_lengths, target_lengths)
 
                     total_loss += loss.item() * y.shape[0]
 
-            val_losses.append(total_loss / len(val_loader.dataset))  # ty: ignore[invalid-argument-type]
+            val_losses.append(total_loss / len(self.val_loader.dataset))  # ty: ignore[invalid-argument-type]
 
-            if early_stopping.step(val_losses[-1], model):
+            if self.early_stopping.step(val_losses[-1], self.model):
                 print(f"Early stopping at epoch {epoch + 1}")
                 break
 
-        return np.array([train_losses, val_losses])
-
-    # @property
-    # def device(self) -> str
-    # return model.device.type
+        return Losses(np.array([train_losses, val_losses]))
 
     def raw_predict(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -142,13 +197,13 @@ class Basecaller:
         """
         assert x.ndim == 3, "Input must be a 3D tensor"
 
-        model.eval()
+        self.model.eval()
 
         with torch.inference_mode():
             x = x.to("cuda")
 
             # (Forward pass)
-            y_ = model(x)
+            y_ = self.model(x)
 
             # Get the largest logit.
             predictions = y_.argmax(1).cpu()
@@ -177,9 +232,7 @@ class Basecaller:
 
         return decoded_predictions
 
-    def compute_test_cer(
-        self,
-    ) -> float:
+    def compute_test_cer(self) -> float:
         """
         Computes the CER (Character Error Rate) on the test set and returns it as a float
         """
@@ -189,11 +242,11 @@ class Basecaller:
         cers: list[float] = []
 
         with torch.inference_mode():
-            for x, y, target_lengths in test_loader:
+            for x, y, target_lengths in self.test_loader:
                 x = x.to("cuda")
                 y = y.to("cuda")
 
-                y_ = model(x)
+                y_ = self.model(x)
                 batched_predictions = y_.argmax(1).cpu()
 
                 for i in range(len(x)):
@@ -205,9 +258,8 @@ class Basecaller:
                     prediction = prediction[prediction != 0]
 
                     # decode the sequence and the expected sequence
-                    decoded_predictions = decode_sequence(prediction)
-                    decoded_expected = decode_sequence(
-
+                    decoded_predictions = BasecallerHarness.decode_sequence(prediction)
+                    decoded_expected = BasecallerHarness.decode_sequence(
                         # TODO: Not sure if torch.tensor and tolist are cancelling
                         # themselves out...
                         torch.tensor(
@@ -229,120 +281,24 @@ class Basecaller:
         return np.mean(cers)
 
 
-# %%
-train_loader, val_loader, test_loader = (
-    torch.utils.data.DataLoader(
-        d,
-        batch_size=256,
-        shuffle=shuffle,
-        pin_memory=True,
-    )
-    for (d, shuffle) in zip(
-        random_split(
-            Subset(ChunkDataset.full_from_path(DATA_PATH), range(100_000)),
-            [0.7, 0.15, 0.15],
-            generator=torch.Generator().manual_seed(0),
-        ),
-        [True, False, False],
-    )
+caller = BasecallerHarness(
+    model=nn.Sequential(
+        nn.Conv1d(1, 32, kernel_size=15, stride=2, padding=7),
+        nn.ReLU(),
+        nn.Conv1d(32, 128, kernel_size=15, stride=2, padding=7),
+        nn.ReLU(),
+        nn.Conv1d(128, 64, kernel_size=15, padding=7),
+        nn.ReLU(),
+        nn.Conv1d(64, 5, kernel_size=1),
+    ).to("cuda"),
+    split_ratios=[0.8, 0.15, 0.05],
+    dataset_size=1_000,
 )
 
-print(
-    f"Dataset sizes train = {len(train_loader.dataset)}, "  # ty: ignore[invalid-argument-type]
-    f"val = {len(val_loader.dataset)}, "  # ty: ignore[invalid-argument-type]
-    f"test = {len(test_loader.dataset)}"  # ty: ignore[invalid-argument-type]
-)
-
-
-model = nn.Sequential(
-    nn.Conv1d(1, 32, kernel_size=15, stride=2, padding=7),
-    nn.ReLU(),
-    nn.Conv1d(32, 128, kernel_size=15, stride=2, padding=7),
-    nn.ReLU(),
-    nn.Conv1d(128, 64, kernel_size=15, padding=7),
-    nn.ReLU(),
-    nn.Conv1d(64, 5, kernel_size=1),
-).to("cuda")
-
-N_EPOCHS = 100
-
-criterion = nn.CTCLoss(blank=0)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
-early_stopping = EarlyStopping(patience=10)
-
+caller.log_dataset_size()
+losses = caller.train(epochs=10)
 
 # %%
-# save the train and val loss as a 2d numpy array
-np.savez(
-    Path(DATA_PATH).parent / "losses.npz",
-    train_losses=np.array(train_losses),
-    val_losses=np.array(val_losses),
-)
-
-# %%
-early_stopping.restore(model)
-
-# %%
-# load them back up
-with np.load(Path(DATA_PATH).parent / "losses.npz") as data:
-    train_losses = data["train_losses"].tolist()
-    val_losses = data["val_losses"].tolist()
 
 pio.renderers.default = "browser"
-
-fig = go.Figure()
-fig.add_trace(go.Scatter(y=train_losses, name="train loss"))
-fig.add_trace(go.Scatter(y=val_losses, name="val loss"))
-fig.show()
-
-
-# %%
-def decode_sequence(seq: torch.Tensor) -> str:
-    return "".join("ACGT"[i - 1] if i != 0 else "-" for i in seq)
-
-
-model.eval()
-
-total_edit_distance = 0
-sample_count = 0
-
-with torch.inference_mode():
-    x, y, target_lengths = next(iter(test_loader))
-
-    x = x.to("cuda")
-    y = y.to("cuda")
-
-    y_ = model(x)
-    predictions = y_.argmax(1).cpu()
-
-    for i in range(len(x)):
-        pred = predictions[i]
-
-        # print("Raw predictions:")
-        # print(decode_sequence(pred[:150]))
-
-        counts = torch.bincount(pred, minlength=5)
-
-        for symbol, count in zip("-ACGT", counts.tolist()):
-            print(f"{symbol}: {count / len(pred):.2%}")
-
-        # collapse consequetive predictions
-        pred = torch.unique_consecutive(pred)
-        pred = pred[pred != 0]  # remove blank tokens
-
-        # decode the sequence
-        pred_str = decode_sequence(pred)
-
-        ref_ids = y[i, 0 : target_lengths[i]].tolist()
-        expected = decode_sequence(torch.tensor(ref_ids))
-
-        print(f"Expected: {expected}")
-        print(f"Predicted: {pred_str}")
-
-        edit_distance = Levenshtein.distance(expected, pred_str)
-        print(f"Edit distance: {edit_distance}")
-        total_edit_distance += edit_distance
-        sample_count += 1
-        break
-
-print(f"Average edit distance: {total_edit_distance / sample_count:.2f}")
+losses.plot().show()
