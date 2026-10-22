@@ -47,7 +47,7 @@ class BasecallerHarness:
     ):
         self.model = model
         self.criterion = nn.CTCLoss(blank=0)
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
         self.early_stopping = EarlyStopping(
             patience=10,
             path=checkpoint_save_path,
@@ -104,12 +104,12 @@ class BasecallerHarness:
         train_losses = []
         val_losses = []
 
-        for epoch in tqdm(range(epochs)):
+        for epoch in tqdm(range(epochs), position=0):
             ### TRAINING
             self.model.train()
             total_loss = 0
 
-            for x, y, target_lengths in self.train_loader:
+            for x, y, target_lengths in tqdm(self.train_loader, position=1):
                 self.optimizer.zero_grad()
 
                 x = x.to("cuda")
@@ -132,6 +132,20 @@ class BasecallerHarness:
                 loss = self.criterion(log_probs, y, input_lengths, target_lengths)
 
                 loss.backward()
+
+                # gradient clipping
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0, error_if_nonfinite=True)
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None and not torch.isfinite(param.grad).all():
+                        raise RuntimeError(
+                            f"Non-finite gradient in {name}, "
+                            f"loss = {loss.item():.4f}"
+                        )
+
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), 1.0, error_if_nonfinite=True
+                )
+
                 self.optimizer.step()
 
                 total_loss += loss.item() * y.shape[0]
@@ -176,7 +190,8 @@ class BasecallerHarness:
                 break
 
         # restore the best model as per early stopping
-        self.model.load_state_dict(torch.load(self.early_stopping.path))
+        if self.early_stopping.path is not None and Path(self.early_stopping.path).exists():
+            self.model.load_state_dict(torch.load(self.early_stopping.path))
 
         return Losses(np.array([train_losses, val_losses]))
 
@@ -299,26 +314,73 @@ class BasecallerHarness:
         return predicted, expected
 
 
+class BasecallerModel(nn.Module):
+    def __init__(
+        self,
+    ):
+        super().__init__()
+
+        self.cnn = nn.Sequential(
+            # first convolutional layer
+            nn.LazyConv1d(32, kernel_size=15, stride=2, padding=7),
+            nn.LazyBatchNorm1d(),
+            nn.SiLU(), # swish activation function (like the one used in Bonito)
+
+            nn.LazyConv1d(64, kernel_size=15, stride=2, padding=7),
+            nn.LazyBatchNorm1d(),
+            nn.SiLU(),
+
+            nn.LazyConv1d(128, kernel_size=15, stride=1, padding=7),
+            nn.LazyBatchNorm1d(),
+            nn.SiLU(),
+        )
+
+        self.lstm = nn.LSTM(
+            input_size=128,
+            hidden_size=256,
+            num_layers=2,
+            bidirectional=True,
+            batch_first=True,
+            dropout=0.1,
+        )
+
+        self.linear = nn.LazyLinear(5)
+
+    def forward(self, x):
+        # (BATCH, 1, 5000) -> (8, featurs, time)
+        x = self.cnn(x)
+
+        # LSTM expects (B, time, features)
+        x = x.transpose(1, 2)
+
+        # LTSM layer
+        x, _ = self.lstm(x)
+
+        # (linear already operates on the last dimension (which is the feature))
+        x = self.linear(x)
+
+        # Fix the return value to match what we expcect.
+        return x.transpose(1, 2)
+
+model = BasecallerModel().to("cuda")
+
+with torch.no_grad():
+    y_ = model(torch.zeros(1, 5000).unsqueeze(0).to("cuda"))
+
+
 caller = BasecallerHarness(
-    model=nn.Sequential(
-        nn.Conv1d(1, 32, kernel_size=15, stride=2, padding=7),
-        nn.ReLU(),
-        nn.Conv1d(32, 128, kernel_size=15, stride=2, padding=7),
-        nn.ReLU(),
-        nn.Conv1d(128, 64, kernel_size=15, padding=7),
-        nn.ReLU(),
-        nn.Conv1d(64, 5, kernel_size=1),
-    ).to("cuda"),
+    model=model,
     split_ratios=[0.8, 0.15, 0.05],
     dataset_size=1000,
-    batch_size=512,
-    checkpoint_save_path="../.models/5.py",
+    batch_size=32,
+    checkpoint_save_path="../.models/6.pt",
 )
 
 caller.log_dataset_size()
 
 # %%
 losses = caller.train(epochs=1000)
+
 # %%
 random_sample = caller.sample_random(seed=42, source="test")
 predicted, expected = caller.pair_predict(random_sample)
