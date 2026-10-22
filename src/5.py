@@ -1,8 +1,8 @@
 # %%
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
-import plotly.graph_objects as go
 import plotly.io as pio
 import torch
 from rapidfuzz.distance import Levenshtein
@@ -20,6 +20,10 @@ DATA_PATH = bonito_download.download_file(
     Path("../.data"),
     bonito_download.ALL_TRAINING_FILES[1],
 )
+type DataPoint = tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor
+]  # (x, y, target_lengths)
+
 
 # %%
 class BasecallerHarness:
@@ -37,24 +41,41 @@ class BasecallerHarness:
         split_ratios: list[float],
         dataset_size: int,
         model: nn.Module,
+        batch_size: int,
+        checkpoint_save_path: str,
+        dataset_sample_seed: int | None = None,
     ):
         self.model = model
         self.criterion = nn.CTCLoss(blank=0)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
-        self.early_stopping = EarlyStopping(patience=10)
+        self.early_stopping = EarlyStopping(
+            patience=10,
+            path=checkpoint_save_path,
+            verbose=False,
+        )
+
+        dataset = ChunkDataset.full_from_path(DATA_PATH)
+        indices = torch.randperm(
+            len(dataset),
+            generator=torch.Generator().manual_seed(dataset_sample_seed)
+            if dataset_sample_seed is not None
+            else None,
+        )[:dataset_size].tolist()
 
         self.train_loader, self.val_loader, self.test_loader = (
             torch.utils.data.DataLoader(
                 d,
-                batch_size=256,
+                batch_size=batch_size,
                 shuffle=shuffle,
                 pin_memory=True,
             )
             for (d, shuffle) in zip(
                 random_split(
-                    Subset(ChunkDataset.full_from_path(DATA_PATH), range(dataset_size)),
+                    Subset(dataset, indices),
                     split_ratios,
-                    generator=torch.Generator().manual_seed(0),
+                    generator=torch.Generator().manual_seed(dataset_sample_seed + 1)
+                    if dataset_sample_seed is not None
+                    else None,
                 ),
                 [True, False, False],
             )
@@ -72,10 +93,8 @@ class BasecallerHarness:
 
     @staticmethod
     def decode_sequence(seq: torch.Tensor) -> str:
-        """
-        Decodes the given sequence into nucleotides.
-        """
-        return "".join("ACGT"[i - 1] if i != 0 else "-" for i in seq)
+        alphabet = "-ACGT"
+        return "".join(alphabet[i] for i in seq.tolist())
 
     def train(self, epochs: int) -> Losses:
         """
@@ -149,19 +168,21 @@ class BasecallerHarness:
 
                     total_loss += loss.item() * y.shape[0]
 
-            val_losses.append(total_loss / len(self.val_loader.dataset))  # ty: ignore[invalid-argument-type]
+            validation_loss = total_loss / len(self.val_loader.dataset)  # ty: ignore[invalid-argument-type]
+            val_losses.append(validation_loss)
 
-            if self.early_stopping.step(val_losses[-1], self.model):
+            if self.early_stopping(validation_loss, self.model):
                 print(f"Early stopping at epoch {epoch + 1}")
                 break
+
+        # restore the best model as per early stopping
+        self.model.load_state_dict(torch.load(self.early_stopping.path))
 
         return Losses(np.array([train_losses, val_losses]))
 
     def raw_predict(self, x: torch.Tensor) -> torch.Tensor:
         """
         Predicts the sequence given the input x.
-        Returns the largest logit for each timestep,
-        which is a tensor of shape (batch_size, num_classes, timesteps)
         """
         assert x.ndim == 3, "Input must be a 3D tensor"
 
@@ -203,50 +224,79 @@ class BasecallerHarness:
     def compute_test_cer(self) -> float:
         """
         Computes the CER (Character Error Rate) on the test set and returns it as a float
+        throws if the test set is empty
         """
 
+        assert len(self.test_loader.dataset) > 0, "Test set is empty"  # ty: ignore[invalid-argument-type]
+
+        # Put model in eval mode
+        # TODO: Not sure if this is necessary since
+        #       we're using torch.inference_mode() later.
         self.model.eval()
 
-        cers: list[float] = []
+        # cers: list[float] = []
+        total_distance = 0
+        total_bases = 0
 
         with torch.inference_mode():
             for x, y, target_lengths in self.test_loader:
-                x = x.to("cuda")
-                y = y.to("cuda")
+                predictions = self.predict(x)
 
-                y_ = self.model(x)
-                batched_predictions = y_.argmax(1).cpu()
-
-                for i in range(len(x)):
-                    prediction = batched_predictions[i]
-
-                    # collapse consequetive predictions
-                    # and remove blank tokens
-                    prediction = torch.unique_consecutive(prediction)
-                    prediction = prediction[prediction != 0]
-
+                for predicted, target, length in zip(predictions, y, target_lengths):
                     # decode the sequence and the expected sequence
-                    decoded_predictions = BasecallerHarness.decode_sequence(prediction)
-                    decoded_expected = BasecallerHarness.decode_sequence(
-                        # TODO: Not sure if torch.tensor and tolist are cancelling
-                        # themselves out...
-                        torch.tensor(
-                            y[i, 0 : target_lengths[i]].tolist(),
-                        )
+                    expected = BasecallerHarness.decode_sequence(
+                        target[: int(length)].cpu(),
                     )
 
                     # compute the edit distance between the two
-                    # sequences. TODO: Not sure if this is the best way
-                    # we might use a better distance metric in the future.
-                    edit_distance = Levenshtein.distance(
-                        decoded_expected, decoded_predictions
-                    )
+                    # sequences.
+                    # TODO: Not sure if this is the best way
+                    #       we might use a better distance metric in the future.
+                    total_distance += Levenshtein.distance(expected, predicted)
+                    total_bases += len(expected)
 
-                    # cer is just the edit_distance normalized
-                    # by the length of the expected sequence
-                    cers.append(edit_distance / len(decoded_expected))
+        return total_distance / total_bases
 
-        return np.mean(cers)
+    def sample_random(
+        self,
+        seed: int | None,
+        source: Literal[
+            "train",
+            "test",
+            "val",
+        ],
+    ) -> DataPoint:
+        """
+        Samples a random data point from the specified source.
+        """
+        if source == "train":
+            loader = self.train_loader
+        elif source == "val":
+            loader = self.val_loader
+        elif source == "test":
+            loader = self.test_loader
+
+        if len(loader.dataset) == 0:  # ty: ignore[invalid-argument-type]
+            raise ValueError(f"{source} set is empty")
+
+        rng = np.random.default_rng(seed)
+        idx = rng.integers(0, len(loader.dataset))  # ty: ignore[invalid-argument-type]
+
+        return loader.dataset[idx]
+
+    def pair_predict(self, point: DataPoint) -> tuple[str, str]:
+        """
+        Predicts the sequence given the input x.
+        Returns a tuple of (predicted_sequence, expected_sequence)
+        """
+        x, y, target_lengths = point
+
+        predicted = self.predict(x.unsqueeze(0))[0]
+        expected = BasecallerHarness.decode_sequence(
+            y[: int(target_lengths)].cpu(),
+        )
+
+        return predicted, expected
 
 
 caller = BasecallerHarness(
@@ -260,11 +310,25 @@ caller = BasecallerHarness(
         nn.Conv1d(64, 5, kernel_size=1),
     ).to("cuda"),
     split_ratios=[0.8, 0.15, 0.05],
-    dataset_size=1_000,
+    dataset_size=100_000,
+    batch_size=512,
+    checkpoint_save_path="../.models/5.py",
 )
 
 caller.log_dataset_size()
-losses = caller.train(epochs=10)
+
+# %%
+losses = caller.train(epochs=1000)
+# %%
+random_sample = caller.sample_random(seed=42, source="test")
+predicted, expected = caller.pair_predict(random_sample)
+
+# %%
+print(predicted, expected)
+
+# %%
+print(caller.compute_test_cer())
+
 
 # %%
 pio.renderers.default = "browser"
