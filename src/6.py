@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import plotly.express as px
 import plotly.io as pio
 import torch
 from rapidfuzz.distance import Levenshtein
@@ -14,6 +15,9 @@ from common.chunk_dataset import ChunkDataset
 from common.losses import Losses
 from vendor import bonito_download
 from vendor.early_stopping import EarlyStopping
+
+pio.renderers.default = "browser"
+
 
 # %%
 DATA_PATH = bonito_download.download_file(
@@ -138,8 +142,7 @@ class BasecallerHarness:
                 for name, param in self.model.named_parameters():
                     if param.grad is not None and not torch.isfinite(param.grad).all():
                         raise RuntimeError(
-                            f"Non-finite gradient in {name}, "
-                            f"loss = {loss.item():.4f}"
+                            f"Non-finite gradient in {name}, loss = {loss.item():.4f}"
                         )
 
                 torch.nn.utils.clip_grad_norm_(
@@ -190,7 +193,10 @@ class BasecallerHarness:
                 break
 
         # restore the best model as per early stopping
-        if self.early_stopping.path is not None and Path(self.early_stopping.path).exists():
+        if (
+            self.early_stopping.path is not None
+            and Path(self.early_stopping.path).exists()
+        ):
             self.model.load_state_dict(torch.load(self.early_stopping.path))
 
         return Losses(np.array([train_losses, val_losses]))
@@ -324,12 +330,10 @@ class BasecallerModel(nn.Module):
             # first convolutional layer
             nn.LazyConv1d(32, kernel_size=15, stride=2, padding=7),
             nn.LazyBatchNorm1d(),
-            nn.SiLU(), # swish activation function (like the one used in Bonito)
-
+            nn.SiLU(),  # swish activation function (like the one used in Bonito)
             nn.LazyConv1d(64, kernel_size=15, stride=2, padding=7),
             nn.LazyBatchNorm1d(),
             nn.SiLU(),
-
             nn.LazyConv1d(128, kernel_size=15, stride=1, padding=7),
             nn.LazyBatchNorm1d(),
             nn.SiLU(),
@@ -346,7 +350,7 @@ class BasecallerModel(nn.Module):
 
         self.linear = nn.LazyLinear(5)
 
-    def forward(self, x):
+    def forward(self, x):  # ty: ignore[invalid-mutable-override]
         # (BATCH, 1, 5000) -> (8, featurs, time)
         x = self.cnn(x)
 
@@ -361,6 +365,7 @@ class BasecallerModel(nn.Module):
 
         # Fix the return value to match what we expcect.
         return x.transpose(1, 2)
+
 
 model = BasecallerModel().to("cuda")
 
@@ -379,6 +384,12 @@ caller = BasecallerHarness(
 caller.log_dataset_size()
 
 # %%
+first_chunk, _, _ = caller.sample_random(seed=0, source="train")
+fig = px.line(first_chunk.squeeze(0).numpy()[0:500])
+fig.update_layout(showlegend=False, xaxis_title="Time", yaxis_title="Normalized Current")
+fig.write_image("../docs/.images/current.svg")
+
+# %%
 losses = caller.train(epochs=1000)
 
 # %%
@@ -393,7 +404,6 @@ print(caller.compute_test_cer())
 
 
 # %%
-pio.renderers.default = "browser"
 
 losses.plot().show()
 

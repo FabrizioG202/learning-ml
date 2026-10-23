@@ -4,6 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
     "datasets>=5.1.0",
+    "kaleido>=1.5.0",
     "pandas>=3.0.6",
     "plotly>=7.1.0",
     "rapidfuzz>=3.14.6",
