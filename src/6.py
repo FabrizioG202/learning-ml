@@ -1,4 +1,5 @@
 # %%
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
@@ -84,6 +85,11 @@ class BasecallerHarness:
                 [True, False, False],
             )
         )
+
+    def all_data_points(self) -> Iterator[DataPoint]:
+        yield from self.train_loader.dataset
+        yield from self.val_loader.dataset
+        yield from self.test_loader.dataset
 
     def log_dataset_size(self) -> None:
         """
@@ -369,38 +375,40 @@ class BasecallerModel(nn.Module):
 
 model = BasecallerModel().to("cuda")
 
+model.eval()
 with torch.no_grad():
     y_ = model(torch.zeros(1, 5000).unsqueeze(0).to("cuda"))
 
-
-caller = BasecallerHarness(
+harness = BasecallerHarness(
     model=model,
     split_ratios=[0.8, 0.15, 0.05],
     dataset_size=1000,
-    batch_size=32,
+    batch_size=64,
     checkpoint_save_path="../.models/6.pt",
 )
 
-caller.log_dataset_size()
+harness.log_dataset_size()
 
 # %%
-first_chunk, _, _ = caller.sample_random(seed=0, source="train")
+first_chunk, _, _ = harness.sample_random(seed=0, source="train")
 fig = px.line(first_chunk.squeeze(0).numpy()[0:500])
-fig.update_layout(showlegend=False, xaxis_title="Time", yaxis_title="Normalized Current")
+fig.update_layout(
+    showlegend=False, xaxis_title="Time", yaxis_title="Normalized Current"
+)
 fig.write_image("../docs/.images/current.svg")
 
 # %%
-losses = caller.train(epochs=1000)
+losses = harness.train(epochs=2)
 
 # %%
-random_sample = caller.sample_random(seed=42, source="test")
-predicted, expected = caller.pair_predict(random_sample)
+random_sample = harness.sample_random(seed=42, source="test")
+predicted, expected = harness.pair_predict(random_sample)
 
 # %%
 print(predicted, expected)
 
 # %%
-print(caller.compute_test_cer())
+print(harness.compute_test_cer())
 
 
 # %%
