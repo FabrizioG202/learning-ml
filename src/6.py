@@ -1,14 +1,18 @@
 # %%
+import dataclasses
+from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.io as pio
 import torch
 from rapidfuzz.distance import Levenshtein
 from torch import nn
+from torch.nn import LazyConv1d
 from torch.utils.data import Subset, random_split
 from tqdm import tqdm
 
@@ -19,15 +23,93 @@ from vendor.early_stopping import EarlyStopping
 
 pio.renderers.default = "browser"
 
+type DataPoint = tuple[
+    torch.Tensor,  # x
+    torch.Tensor,  # y
+    torch.Tensor,  # target lengths
+]
+
+
+@dataclasses.dataclass
+class ModelResult:
+    model_name: str
+    losses: Losses
+    val_cer: float
+
+@dataclasses.dataclass
+class LRResult:
+    model_name: str
+    lr: float
+    losses: Losses
+    val_cer: float
+
 
 # %%
 DATA_PATH = bonito_download.download_file(
     Path("../.data"),
     bonito_download.ALL_TRAINING_FILES[1],
 )
-type DataPoint = tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor
-]  # (x, y, target_lengths)
+
+# %%
+#
+# Preliminary data analysis
+#
+full_dataset = ChunkDataset.full_from_path(DATA_PATH)
+
+# %%
+#
+# Sample chunk
+#
+
+first_chunk, _, _ = full_dataset[0]
+fig = px.line(first_chunk.squeeze(0).numpy()[0:500])
+fig.update_layout(
+    showlegend=False, xaxis_title="Time", yaxis_title="Normalized Current"
+)
+fig.write_image("../docs/.images/current.svg")
+
+# %%
+#
+# Length distribution
+#
+
+
+fig = px.histogram(full_dataset.reference_lengths, nbins=100).update_layout(
+    xaxis_title="Reference Length",
+    yaxis_title="Count",
+    showlegend=False,
+)
+
+mean_length = np.mean(full_dataset.reference_lengths)
+fig.add_vline(
+    x=mean_length,
+    line_dash="dash",
+    line_color="red",
+    annotation_text=f"Mean: {mean_length:.2f}",
+    annotation_position="top right",
+)
+
+fig.write_image("../docs/.images/reference_lengths.svg")
+
+# %%
+#
+# Nucletide composition
+#
+counts = pd.DataFrame.from_dict(
+    {
+        "-ACGT"[k]: [v]
+        for k, v in Counter(full_dataset.references.flatten().tolist()).items()
+        if k != 0
+    },
+    orient="index",
+    columns=["counts"],
+)
+
+px.histogram(counts, x=counts.index, y="counts").update_layout(
+    xaxis_title="Nucleotide",
+    yaxis_title="Count",
+    showlegend=False,
+).write_image("../docs/.images/nucleotide_composition.svg")
 
 
 # %%
@@ -49,10 +131,11 @@ class BasecallerHarness:
         batch_size: int,
         checkpoint_save_path: str,
         dataset_sample_seed: int | None = None,
+        lr: float = 0.0005,
     ):
         self.model = model
         self.criterion = nn.CTCLoss(blank=0)
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=lr)
         self.early_stopping = EarlyStopping(
             patience=10,
             path=checkpoint_save_path,
@@ -119,7 +202,7 @@ class BasecallerHarness:
             self.model.train()
             total_loss = 0
 
-            for x, y, target_lengths in tqdm(self.train_loader, position=1):
+            for x, y, target_lengths in self.train_loader:
                 self.optimizer.zero_grad()
 
                 x = x.to("cuda")
@@ -157,7 +240,7 @@ class BasecallerHarness:
 
                 self.optimizer.step()
 
-                total_loss += loss.item() * y.shape[0]
+                total_loss += loss.item() * x.shape[0]
 
             train_losses.append(total_loss / len(self.train_loader.dataset))  # ty: ignore[invalid-argument-type]
 
@@ -189,12 +272,14 @@ class BasecallerHarness:
 
                     loss = self.criterion(log_probs, y, input_lengths, target_lengths)
 
-                    total_loss += loss.item() * y.shape[0]
+                    total_loss += loss.item() * x.shape[0]
 
             validation_loss = total_loss / len(self.val_loader.dataset)  # ty: ignore[invalid-argument-type]
             val_losses.append(validation_loss)
 
-            if self.early_stopping(validation_loss, self.model):
+            self.early_stopping(validation_loss, self.model)
+
+            if self.early_stopping.early_stop:
                 print(f"Early stopping at epoch {epoch + 1}")
                 break
 
@@ -248,7 +333,7 @@ class BasecallerHarness:
 
         return decoded_predictions
 
-    def compute_test_cer(self) -> float:
+    def compute_val_cer(self) -> float:
         """
         Computes the CER (Character Error Rate) on the test set and returns it as a float
         throws if the test set is empty
@@ -266,7 +351,7 @@ class BasecallerHarness:
         total_bases = 0
 
         with torch.inference_mode():
-            for x, y, target_lengths in self.test_loader:
+            for x, y, target_lengths in self.val_loader:
                 predictions = self.predict(x)
 
                 for predicted, target, length in zip(predictions, y, target_lengths):
@@ -329,29 +414,34 @@ class BasecallerHarness:
 class BasecallerModel(nn.Module):
     def __init__(
         self,
+        first_cnn_layer: nn.LazyConv1d,
+        second_cnn_layer: nn.LazyConv1d,
+        third_cnn_layer: nn.LazyConv1d,
+        lstm_hidden_size: int,
+        lstm_num_layers: int,
     ):
         super().__init__()
 
         self.cnn = nn.Sequential(
             # first convolutional layer
-            nn.LazyConv1d(32, kernel_size=15, stride=2, padding=7),
+            first_cnn_layer,
             nn.LazyBatchNorm1d(),
             nn.SiLU(),  # swish activation function (like the one used in Bonito)
-            nn.LazyConv1d(64, kernel_size=15, stride=2, padding=7),
+            second_cnn_layer,
             nn.LazyBatchNorm1d(),
             nn.SiLU(),
-            nn.LazyConv1d(128, kernel_size=15, stride=1, padding=7),
+            third_cnn_layer,
             nn.LazyBatchNorm1d(),
             nn.SiLU(),
         )
 
         self.lstm = nn.LSTM(
-            input_size=128,
-            hidden_size=256,
-            num_layers=2,
+            input_size=third_cnn_layer.out_channels,
+            hidden_size=lstm_hidden_size,
+            num_layers=lstm_num_layers,
             bidirectional=True,
             batch_first=True,
-            dropout=0.1,
+            dropout=0.1 if lstm_num_layers > 1 else 0.0,
         )
 
         self.linear = nn.LazyLinear(5)
@@ -372,33 +462,129 @@ class BasecallerModel(nn.Module):
         # Fix the return value to match what we expcect.
         return x.transpose(1, 2)
 
-
-model = BasecallerModel().to("cuda")
-
-model.eval()
-with torch.no_grad():
-    y_ = model(torch.zeros(1, 5000).unsqueeze(0).to("cuda"))
-
-harness = BasecallerHarness(
-    model=model,
-    split_ratios=[0.8, 0.15, 0.05],
-    dataset_size=1000,
-    batch_size=64,
-    checkpoint_save_path="../.models/6.pt",
-)
-
-harness.log_dataset_size()
+# (the function below was generated by an LLM)
+# TODO: This might actually be a constructor on the BasecallerModel class
+def create_model(config: dict) -> BasecallerModel:
+    return BasecallerModel(
+        first_cnn_layer=nn.LazyConv1d(
+            config["channels"][0],
+            kernel_size=config["kernels"][0],
+            stride=2,
+            padding=config["kernels"][0] // 2,
+        ),
+        second_cnn_layer=nn.LazyConv1d(
+            config["channels"][1],
+            kernel_size=config["kernels"][1],
+            stride=2,
+            padding=config["kernels"][1] // 2,
+        ),
+        third_cnn_layer=nn.LazyConv1d(
+            config["channels"][2],
+            kernel_size=config["kernels"][2],
+            stride=1,
+            padding=config["kernels"][2] // 2,
+        ),
+        lstm_hidden_size=config["lstm_hidden_size"],
+        lstm_num_layers=config["lstm_num_layers"],
+    ).to("cuda")
 
 # %%
-first_chunk, _, _ = harness.sample_random(seed=0, source="train")
-fig = px.line(first_chunk.squeeze(0).numpy()[0:500])
-fig.update_layout(
-    showlegend=False, xaxis_title="Time", yaxis_title="Normalized Current"
-)
-fig.write_image("../docs/.images/current.svg")
+#
+# model selection
+#
+
+# We use factories so that we
+# can recreate the best model.
+MODEL_CONFIGS = {
+    "small": {
+        "channels": (16, 32, 64),
+        "kernels": (15, 15, 15),
+        "lstm_hidden_size": 128,
+        "lstm_num_layers": 1,
+    },
+    "medium": {
+        "channels": (32, 64, 128),
+        "kernels": (15, 15, 15),
+        "lstm_hidden_size": 256,
+        "lstm_num_layers": 2,
+    },
+    "large": {
+        "channels": (32, 64, 128),
+        "kernels": (15, 21, 31),
+        "lstm_hidden_size": 256,
+        "lstm_num_layers": 2,
+    },
+}
+
+SELECTION_DATASET_SIZE = 5_000
+
+
+
+
+
+# (for reporoducibility purposes)
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+
+
+results: list[ModelResult] = []
+
+for name, config in MODEL_CONFIGS.items():
+    model = create_model(config)
+
+    model.eval()
+
+    # (initialize lazy layers)
+    with torch.no_grad():
+        y_ = model(torch.zeros(1, 5000).unsqueeze(0).to("cuda"))
+
+    harness = BasecallerHarness(
+        model=model,
+        split_ratios=[0.8, 0.05, 0.15],
+        dataset_size=SELECTION_DATASET_SIZE,
+        batch_size=64,
+        checkpoint_save_path=f"../.models/6_{name}.pt",
+        dataset_sample_seed=0,
+    )
+
+    losses = harness.train(epochs=100)
+
+    results.append(ModelResult(name, losses, harness.compute_val_cer()))
+
+best_model = min(results, key=lambda r: r.val_cer)
+print(f"Best model: {best_model.model_name} with val_cer = {best_model.val_cer:.4f}")
 
 # %%
-losses = harness.train(epochs=2)
+#
+# lr selection
+#
+
+lr_results : list[LRResult] = []
+
+for lr in [0.001, 0.0005, 0.0001]:
+    model = create_model(MODEL_CONFIGS[best_model.model_name])
+    model.eval()
+
+    # (initialize lazy layers)
+    with torch.no_grad():
+        y_ = model(torch.zeros(1, 5000).unsqueeze(0).to("cuda"))
+
+    harness = BasecallerHarness(
+        model=model,
+        split_ratios=[0.8, 0.05, 0.15],
+        dataset_size=SELECTION_DATASET_SIZE,
+        batch_size=64,
+        checkpoint_save_path=f"../.models/6_{name}_lr{lr}.pt",
+        dataset_sample_seed=0,
+        lr=lr,
+    )
+
+    losses = harness.train(epochs=100)
+
+    lr_results.append(LRResult(best_model.model_name, lr, losses, harness.compute_val_cer()))
+
+best_lr_model = min(lr_results, key=lambda r: r.val_cer)
+print(f"Best model: {best_lr_model.model_name} with val_cer = {best_lr_model.val_cer:.4f} and lr = {best_lr_model.lr}")
 
 # %%
 random_sample = harness.sample_random(seed=42, source="test")
@@ -408,7 +594,7 @@ predicted, expected = harness.pair_predict(random_sample)
 print(predicted, expected)
 
 # %%
-print(harness.compute_test_cer())
+print(harness.compute_val_cer())
 
 
 # %%
