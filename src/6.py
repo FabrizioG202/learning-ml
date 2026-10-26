@@ -518,10 +518,6 @@ MODEL_CONFIGS = {
 
 SELECTION_DATASET_SIZE = 5_000
 
-
-
-
-
 # (for reporoducibility purposes)
 torch.manual_seed(42)
 torch.cuda.manual_seed_all(42)
