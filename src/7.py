@@ -83,3 +83,14 @@ class AddAndNorm(nn.Module):
         normalized = (x - means) / (torch.sqrt(var + self.eps))
 
         return self.alpha * normalized + self.bias
+
+class FeedForward(nn.Module):
+    def __init__(self, d_model: int, d_ff : int, dropout : float):
+        super().__init__()
+
+        self.dropout = nn.Dropout(dropout)
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+
+    def forward(self, x : torch.Tensor):  # ty: ignore[invalid-mutable-override]
+        return self.linear2(self.dropout(F.relu(self.linear1(x))))
