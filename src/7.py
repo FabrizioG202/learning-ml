@@ -179,3 +179,15 @@ class MultiHeadAttention(nn.Module):
 
         # (batch, seq_len, d_model) ---> (batch, seq_len, d_model)
         return self.w_o(x)
+
+class ResidualConnection(nn.Module):
+    def __init__(self, droupout : float):
+        super().__init__()
+
+        self.norm = AddAndNorm()
+        self.dropout = nn.Dropout(droupout)
+
+    def forward(self, x, sublayer : nn.Module):  # ty: ignore[invalid-mutable-override]
+        return x + self.dropout(self.norm(sublayer(x)))
+
+# class Encoder(nn.Module)
