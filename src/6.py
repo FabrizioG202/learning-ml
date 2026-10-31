@@ -335,11 +335,11 @@ class BasecallerHarness:
 
     def compute_val_cer(self) -> float:
         """
-        Computes the CER (Character Error Rate) on the test set and returns it as a float
-        throws if the test set is empty
+        Computes the CER (Character Error Rate) on the validation set and returns it as a float
+        throws if the validation set is empty
         """
 
-        assert len(self.test_loader.dataset) > 0, "Test set is empty"  # ty: ignore[invalid-argument-type]
+        assert len(self.val_loader.dataset) > 0, "Test set is empty"  # ty: ignore[invalid-argument-type]
 
         # Put model in eval mode
         # TODO: Not sure if this is necessary since
@@ -516,7 +516,7 @@ MODEL_CONFIGS = {
     },
 }
 
-SELECTION_DATASET_SIZE = 5_000
+SELECTION_DATASET_SIZE = 10_000
 
 # (for reporoducibility purposes)
 torch.manual_seed(42)
@@ -581,6 +581,8 @@ for lr in [0.001, 0.0005, 0.0001]:
 
 best_lr_model = min(lr_results, key=lambda r: r.val_cer)
 print(f"Best model: {best_lr_model.model_name} with val_cer = {best_lr_model.val_cer:.4f} and lr = {best_lr_model.lr}")
+# %%
+lr_results
 
 # %%
 random_sample = harness.sample_random(seed=42, source="test")

@@ -50,6 +50,43 @@ As the loss function, we used `pytorch`'s `CTCLoss`. This loss function wllows t
   ],
 )
 
+= Hyperparameter Tuning
+We ran 2 sets of tests to select:
+- A model size. Different models structures are reported in figure x and run results are reported in @model_size_selection.
+- The value of Learning Rate (lr). Results are reported in @lr_selection.
+
+The metric used for comparison was the average Character Error Rate (CER) computed on the sequences from the validation set.
+All tests were ran for a maximum of 100 epochs on a dataset size of $10000$, with a train, validation and test split of 80%, 5% and 15%. Entries for this dataset were randomly sampled from the whole $1$ million entry dataset.
+
+#figure(table(
+  columns: (auto, auto, auto, auto),
+  align: (left, center, center, center),
+  inset: 8pt,
+  table.header([*Model*], [*Validation CER*], [*Training time*], [*Early stopping epoch*]),
+  [Small], [0.2083], [00:31:20], [—],
+  [*Medium*], [0.1634], [01:51:39], [60],
+  [Large], [0.1719], [01:42:08], [55],
+),
+caption: [
+  Results of Model selection runs. Medium achieved the smallest CER
+])<model_size_selection>
+
+#figure(table(
+  columns: (auto, auto, auto, auto),
+  align: (center, center, center, center),
+  inset: 8pt,
+  table.header(
+    [*Learning rate*],
+    [*Validation CER*],
+    [*Training time*],
+    [*Early stopping epoch*],
+  ),
+  [*0.001*], [0.1600], [01:15:33], [41],
+  [0.0005], [0.1603], [01:48:30], [59],
+  [0.0001], [0.2121], [03:04:52], [—],
+))<lr_selection>
+
+
 = Future Directions
 The model, as its currently organized, is flexible and can be retrained on different datasets, including modified bases, such as 5mc, 6ma or 4mc. The code could be adapted easily to fit this new scenario, only requiring a slightly bigger model, as we currently produce 5 logits (4 unmofied bases and a blank state) for each timestep.
 
